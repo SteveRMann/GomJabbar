@@ -1,0 +1,47 @@
+Here's the pin layout:
+
+| Pin | GPIO | Function |
+|---|---|---|
+| D1, D2 | GPIO5, GPIO4 | reserved — I2C (gesture sensor) |
+| D3 | GPIO0 | pump MOSFET |
+| D4 | GPIO2 | button (INPUT_PULLUP, to GND) |
+| D5 | GPIO14 | eyes – Red |
+| D6 | GPIO12 | eyes – Green |
+| D7 | GPIO13 | eyes – Blue |
+| D8 | GPIO15 | speaker (tone) |
+
+A couple of assumptions I made, flag if wrong:
+- Both eyes are wired **in parallel on the same three PWM lines** (so they always match colors/intensity
+— this is the simple/cheap way to do "a pair of eyes" that move together). If you eventually want them
+independently animated, that needs a driver chip (e.g. PCA9685 over your I2C bus) since you're out of
+free PWM-capable pins otherwise.
+
+- The speaker is a small piezo or driven through a transistor — a bare GPIO can drive a piezo buzzer
+directly, but if you want a slightly louder mini speaker, it'll need a simple NPN transistor + resistor between D8 and the speaker.
+
+For the sneeze, I built it as: a rising "charge-up" whine → a jagged high-frequency "burst" (this is
+where the pump fires) → a low descending wet "honk" tail. Totally invented alien physiology, so treat all
+the frequencies/durations as a first draft to tune by ear.
+
+The whole thing is a non-blocking `millis()` state machine (idle breathing → red ramp → 3x sneeze+pump →
+fade to dim blue → back to idle), so nothing blocks the loop and it'll play nicely once you add the
+gesture sensor as a second trigger.Things you'll probably want to tune once you see/hear it running:
+
+- **`IDLE_MAX_BRIGHTNESS`** — if the idle breathing feels too bright/dim relative to the alert red.
+
+- **The sneeze array** — this is the part I have zero real-world reference for. Add/remove steps, widen
+the frequency swings, or lengthen the "wet tail" durations to taste. `PUMP_FIRE_STEP` (currently index 6,
+the start of the burst) controls exactly when in the sound the spit fires — move it earlier/later if you
+want the spit to lead or lag the sound.
+
+- **`SNEEZE_GAP_MS`** — pause between the three sneeze+spit reps.
+
+- **`FADE_OUT_MS` / `DIM_BLUE_LEVEL`** — how the "come down" from red back to resting looks.
+
+One thing to watch on real hardware: `tone()` on the ESP8266 briefly disables interrupts each cycle,
+which *can* cause tiny glitches in things that rely on precise timing (like a future `SoftwareSerial` if
+you ever add the DFPlayer back, or possibly your I2C gesture polling if it happens mid-sneeze). Since
+you're going tone-only with no DFPlayer, that risk mostly goes away — just keep it in mind when you wire
+in the gesture sensor as a second trigger.
+
+
