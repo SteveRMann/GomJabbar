@@ -11,48 +11,74 @@
 // ============================================================
 
 #include <Arduino.h>
+#include "Adafruit_VL53L0X.h"
+
+Adafruit_VL53L0X lox = Adafruit_VL53L0X();
+
 
 // ---------------- Pin assignments ----------------
-const int BUTTON_PIN  = D3;  // button to GND, INPUT_PULLUP
-const int PUMP_PIN    = D4;  // MOSFET gate, active HIGH
-const int EYE_B_PIN   = D5;
-const int EYE_G_PIN   = D6;
-const int EYE_R_PIN   = D7;
+const int sclPin = D1;
+const int sdaPin = D2;
+const int BUTTON_PIN = D3;  // button to GND, INPUT_PULLUP
+const int PUMP_PIN = D4;    // MOSFET gate, active HIGH
+const int EYE_B_PIN = D5;
+const int EYE_G_PIN = D6;
+const int EYE_R_PIN = D7;
 const int SPEAKER_PIN = D8;  // tone() output
 
 // ---------------- Tunable timing ----------------
 const unsigned long BREATH_PERIOD_MS = 7000;  // one idle brightness breathe cycle
-const unsigned long COLOR_PERIOD_MS  = 16000; // one blue<->green color drift cycle (deliberately not a clean multiple of BREATH_PERIOD_MS so the two never lock into a repeating pattern)
-const int IDLE_MAX_BRIGHTNESS        = 700;   // of 1023, idle eye ceiling
-const int IDLE_MIN_BRIGHTNESS        = 180;   // of 1023, idle eye floor -- never fully off
+const unsigned long COLOR_PERIOD_MS = 16000;  // one blue<->green color drift cycle (deliberately not a clean multiple of BREATH_PERIOD_MS so the two never lock into a repeating pattern)
+const int IDLE_MAX_BRIGHTNESS = 700;          // of 1023, idle eye ceiling
+const int IDLE_MIN_BRIGHTNESS = 180;          // of 1023, idle eye floor -- never fully off
 
-const unsigned long RAMP_MS          = 1000;  // idle-color -> red ramp
-const int SNEEZE_REPS                = 3;
-const unsigned long SNEEZE_GAP_MS    = 400;   // pause between reps
-const unsigned long PUMP_PULSE_MS    = 50;    // pump ON time per pulse
-const unsigned long FADE_OUT_MS      = 1000;  // red -> black
-const unsigned long FADE_IN_MS       = 1000;  // black -> idle breathing
+const unsigned long RAMP_MS = 1000;  // idle-color -> red ramp
+const int SNEEZE_REPS = 3;
+const unsigned long SNEEZE_GAP_MS = 400;  // pause between reps
+const unsigned long PUMP_PULSE_MS = 50;   // pump ON time per pulse
+const unsigned long FADE_OUT_MS = 1000;   // red -> black
+const unsigned long FADE_IN_MS = 1000;    // black -> idle breathing
 
-const unsigned long DEBOUNCE_MS      = 30;
+const unsigned long DEBOUNCE_MS = 30;
 
 // ---------------- Sneeze tone sequence ----------------
 // Invented alien "sneeze": rising charge-up whine, jagged burst,
 // descending wet honk tail. Tune freely by ear.
-struct ToneStep { uint16_t freq; uint16_t dur; };
+struct ToneStep {
+  uint16_t freq;
+  uint16_t dur;
+};
 
 const ToneStep sneezeSeq[] = {
   // charge-up whine (rising)
-  {400, 60}, {500, 55}, {650, 50}, {800, 45}, {1000, 40}, {1300, 35},
+  { 400, 60 },
+  { 500, 55 },
+  { 650, 50 },
+  { 800, 45 },
+  { 1000, 40 },
+  { 1300, 35 },
   // crackling burst  <-- pump fires when this segment starts
-  {2400, 25}, {3400, 18}, {1600, 15}, {2800, 18}, {1100, 15}, {2000, 15},
+  { 2400, 25 },
+  { 3400, 18 },
+  { 1600, 15 },
+  { 2800, 18 },
+  { 1100, 15 },
+  { 2000, 15 },
   // wet descending tail
-  {350, 70}, {220, 90}, {140, 120}
+  { 350, 70 },
+  { 220, 90 },
+  { 140, 120 }
 };
-const int SNEEZE_SEQ_LEN   = sizeof(sneezeSeq) / sizeof(sneezeSeq[0]);
-const int PUMP_FIRE_STEP   = 6;  // index of first "burst" step above
+const int SNEEZE_SEQ_LEN = sizeof(sneezeSeq) / sizeof(sneezeSeq[0]);
+const int PUMP_FIRE_STEP = 6;  // index of first "burst" step above
 
 // ---------------- State machine ----------------
-enum State { IDLE, RAMP_TO_RED, SNEEZE_PLAY, SNEEZE_GAP, FADE_TO_BLACK, FADE_IN_IDLE };
+enum State { IDLE,
+             RAMP_TO_RED,
+             SNEEZE_PLAY,
+             SNEEZE_GAP,
+             FADE_TO_BLACK,
+             FADE_IN_IDLE };
 State state = IDLE;
 unsigned long stateStartTime = 0;
 
@@ -77,6 +103,9 @@ bool buttonStable = HIGH;
 // current eye color (so ramp/fade can read the live idle color)
 int curR = 0, curG = 0, curB = 0;
 
+
+
+// ******************** setup() ********************
 void setup() {
   pinMode(PUMP_PIN, OUTPUT);
   digitalWrite(PUMP_PIN, LOW);
@@ -89,28 +118,46 @@ void setup() {
   pinMode(EYE_B_PIN, OUTPUT);
 
   Serial.begin(115200);
+  Serial.println();
   Serial.println("Alien spitter ready.");
+
+  Wire.begin(sdaPin, sclPin);
+  delay(500);
+
+  if (!lox.begin()) {
+    Serial.println(F("Failed to boot VL53L0X"));
+    while (1)
+      ;
+  }
 
   stateStartTime = millis();
 }
 
+
+
+// ******************** loop ********************
 void loop() {
   unsigned long now = millis();
+
+  VL53L0X_RangingMeasurementData_t measure;
+  lox.rangingTest(&measure, false);  // pass in 'true' to get debug data printout!
 
   updateButton(now);
   updatePump(now);
 
   switch (state) {
-    case IDLE:          runIdle(now);        break;
-    case RAMP_TO_RED:    runRamp(now);        break;
-    case SNEEZE_PLAY:    runSneezePlay(now);  break;
-    case SNEEZE_GAP:     runSneezeGap(now);   break;
-    case FADE_TO_BLACK:  runFadeToBlack(now); break;
-    case FADE_IN_IDLE:   runFadeInIdle(now);  break;
+    case IDLE: runIdle(now); break;
+    case RAMP_TO_RED: runRamp(now); break;
+    case SNEEZE_PLAY: runSneezePlay(now); break;
+    case SNEEZE_GAP: runSneezeGap(now); break;
+    case FADE_TO_BLACK: runFadeToBlack(now); break;
+    case FADE_IN_IDLE: runFadeInIdle(now); break;
   }
 }
 
-// ---------------- Button ----------------
+
+
+//  ******************** Button  ********************
 void updateButton(unsigned long now) {
   int raw = digitalRead(BUTTON_PIN);
 
@@ -130,7 +177,8 @@ void updateButton(unsigned long now) {
   }
 }
 
-// ---------------- Pump (independent timer) ----------------
+
+// ******************** Pump (independent timer)  ********************
 void firePumpPulse(unsigned long now) {
   digitalWrite(PUMP_PIN, HIGH);
   pumpOn = true;
@@ -144,9 +192,12 @@ void updatePump(unsigned long now) {
   }
 }
 
-// ---------------- Eyes ----------------
+
+//  ******************** Eyes  ********************
 void setEyeColor(int r, int g, int b) {
-  curR = r; curG = g; curB = b;
+  curR = r;
+  curG = g;
+  curB = b;
   analogWrite(EYE_R_PIN, r);
   analogWrite(EYE_G_PIN, g);
   analogWrite(EYE_B_PIN, b);
@@ -156,18 +207,19 @@ int lerp(int a, int b, float t) {
   return a + (int)((b - a) * t);
 }
 
-// ---------------- IDLE: slow, smooth, never-off blue<->green breathing ----------------
+
+//  ******************** IDLE: slow, smooth, never-off blue<->green breathing  ********************
 // Pure function of "elapsed" so both steady idle and the fade-in can share it.
 void computeIdleColor(unsigned long elapsed, int &g, int &b) {
   // brightness: continuous sine, floored so it never reaches 0
   float bPhase = (float)(elapsed % BREATH_PERIOD_MS) / (float)BREATH_PERIOD_MS;
-  float bWave = (sinf(bPhase * 2.0 * PI) + 1.0) / 2.0; // 0..1
+  float bWave = (sinf(bPhase * 2.0 * PI) + 1.0) / 2.0;  // 0..1
   int level = IDLE_MIN_BRIGHTNESS + (int)(bWave * (IDLE_MAX_BRIGHTNESS - IDLE_MIN_BRIGHTNESS));
 
   // color: separate, slower sine blends continuously between blue and green
   // (no hard switch -- always some mix of both)
   float cPhase = (float)(elapsed % COLOR_PERIOD_MS) / (float)COLOR_PERIOD_MS;
-  float cWave = (sinf(cPhase * 2.0 * PI) + 1.0) / 2.0; // 0..1, 0=blue 1=green
+  float cWave = (sinf(cPhase * 2.0 * PI) + 1.0) / 2.0;  // 0..1, 0=blue 1=green
 
   g = (int)(level * cWave);
   b = (int)(level * (1.0 - cWave));
@@ -182,7 +234,9 @@ void runIdle(unsigned long now) {
 
 // ---------------- RAMP_TO_RED ----------------
 void beginRamp(unsigned long now) {
-  rampStartR = curR; rampStartG = curG; rampStartB = curB;
+  rampStartR = curR;
+  rampStartG = curG;
+  rampStartB = curB;
   state = RAMP_TO_RED;
   stateStartTime = now;
 }
@@ -217,7 +271,7 @@ void startSneezeSequence(unsigned long now) {
 }
 
 void runSneezePlay(unsigned long now) {
-  setEyeColor(1023, 0, 0); // solid red while sneezing
+  setEyeColor(1023, 0, 0);  // solid red while sneezing
 
   if (sneezeStepIdx == PUMP_FIRE_STEP && !pumpFiredThisRep) {
     firePumpPulse(now);
@@ -244,7 +298,7 @@ void runSneezePlay(unsigned long now) {
 }
 
 void runSneezeGap(unsigned long now) {
-  setEyeColor(1023, 0, 0); // stay red between reps
+  setEyeColor(1023, 0, 0);  // stay red between reps
   if (now - stateStartTime >= SNEEZE_GAP_MS) {
     startSneezeSequence(now);
   }
