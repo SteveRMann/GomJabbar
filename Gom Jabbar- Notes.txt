@@ -16,3 +16,31 @@ Cultural Notes: Local settlers regard Water Watchers as gentle omens of renewal.
 Zookeeper Advisory: Harmless and shy. Loud noises, sudden movements, or sharp claps may trigger the Water Watcher’s reflexive startle response. If its eyes begin glowing red or you hear a warning trill, the creature is preparing a harmless water “sneeze.” The liquid is clean and non toxic. Approach calmly, speak softly, and avoid leaning directly over the creature’s line of sight.
 
 Warning: If its eyes turn red, the Water Watcher might sneeze. Step back so you don’t get sprinkled!
+
+
+
+============================================
+
+Range of VL53L0X
+Finding the maximum dustance.
+
+ out of range 
+ out of range 
+ out of range 
+Distance (mm): 1246
+Distance (mm): 1241
+Distance (mm): 1213
+Distance (mm): 1241
+Distance (mm): 1244
+Distance (mm): 1188
+Distance (mm): 1197
+Distance (mm): 1128
+Distance (mm): 1038
+Distance (mm): 1025
+Distance (mm): 965
+Distance (mm): 824
+Distance (mm): 841
+Distance (mm): 801
+
+============================================
+

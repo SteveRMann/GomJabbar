@@ -1,10 +1,11 @@
 // ============================================================
 // Alien Spitter Prop - Wemos D1 Mini (ESP8266)
 // ============================================================
-// Sequence on button press:
+// Sequence on button press OR TOF proximity trigger:
 //   1. Eyes ramp blue-green(idle) -> red over 1s
 //   2. 3x { sneeze tone burst + pump pulse, simultaneously }
 //   3. Eyes fade red -> black over 1s, then fade black -> idle breathing over 1s
+//   4. Neither trigger can fire again until QUIET_MS has passed
 //
 // D1/D2 (GPIO5/GPIO4) are reserved for a future I2C gesture
 // sensor and are NOT used in this sketch.
@@ -26,7 +27,8 @@ const int EYE_G_PIN = D6;
 const int EYE_R_PIN = D7;
 const int SPEAKER_PIN = D8;  // tone() output
 
-// ---------------- Tunable timing ----------------
+
+// ---------------- Tunable ----------------
 const unsigned long BREATH_PERIOD_MS = 7000;  // one idle brightness breathe cycle
 const unsigned long COLOR_PERIOD_MS = 16000;  // one blue<->green color drift cycle (deliberately not a clean multiple of BREATH_PERIOD_MS so the two never lock into a repeating pattern)
 const int IDLE_MAX_BRIGHTNESS = 700;          // of 1023, idle eye ceiling
@@ -38,6 +40,9 @@ const unsigned long SNEEZE_GAP_MS = 400;  // pause between reps
 const unsigned long PUMP_PULSE_MS = 50;   // pump ON time per pulse
 const unsigned long FADE_OUT_MS = 1000;   // red -> black
 const unsigned long FADE_IN_MS = 1000;    // black -> idle breathing
+
+const int sneezeZone = 200;         // Distance (mm) to TOF sensor to trigger a sneeze
+const unsigned long QUIET_MS = 2000; // cooldown after a sequence ends before button OR TOF can trigger the next one
 
 const unsigned long DEBOUNCE_MS = 30;
 
@@ -103,6 +108,9 @@ bool buttonStable = HIGH;
 // current eye color (so ramp/fade can read the live idle color)
 int curR = 0, curG = 0, curB = 0;
 
+// quiet-time cooldown -- neither trigger fires again until millis() >= cooldownUntil
+unsigned long cooldownUntil = 0;
+
 
 
 // ******************** setup() ********************
@@ -142,7 +150,7 @@ void loop() {
   VL53L0X_RangingMeasurementData_t measure;
   lox.rangingTest(&measure, false);  // pass in 'true' to get debug data printout!
 
-  updateButton(now);
+  updateTrigger(now, measure);
   updatePump(now);
 
   switch (state) {
@@ -157,8 +165,11 @@ void loop() {
 
 
 
-//  ******************** Button  ********************
-void updateButton(unsigned long now) {
+//  ******************** Trigger: button OR TOF proximity  ********************
+void updateTrigger(unsigned long now, const VL53L0X_RangingMeasurementData_t &measure) {
+  bool canTrigger = (state == IDLE) && (now >= cooldownUntil);
+
+  // --- button, debounced ---
   int raw = digitalRead(BUTTON_PIN);
 
   if (raw != lastRawButtonState) {
@@ -166,14 +177,28 @@ void updateButton(unsigned long now) {
     lastRawButtonState = raw;
   }
 
+  bool buttonJustPressed = false;
   if (now - lastDebounceTime > DEBOUNCE_MS) {
     if (raw != buttonStable) {
       buttonStable = raw;
-      if (buttonStable == LOW && state == IDLE) {
-        Serial.println("Button pressed -> alert sequence");
-        beginRamp(now);
+      if (buttonStable == LOW) {
+        buttonJustPressed = true;
       }
     }
+  }
+
+  if (buttonJustPressed && canTrigger) {
+    Serial.println("Button pressed -> alert sequence");
+    beginRamp(now);
+    return;
+  }
+
+  // --- TOF proximity ---
+  // RangeStatus 4 means phase failure / bad reading, so it's excluded here
+  // even though it isn't a trigger to begin with.
+  if (canTrigger && measure.RangeStatus != 4 && measure.RangeMilliMeter < sneezeZone) {
+    Serial.println("TOF proximity -> alert sequence");
+    beginRamp(now);
   }
 }
 
@@ -347,5 +372,6 @@ void runFadeInIdle(unsigned long now) {
     // breathing/color-drift animation continues seamlessly from here
     // instead of jumping back to its own t=0.
     state = IDLE;
+    cooldownUntil = now + QUIET_MS; // neither trigger fires again until this passes
   }
 }
