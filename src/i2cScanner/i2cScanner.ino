@@ -8,8 +8,8 @@
 
 #include <Wire.h>
 
-const int sclPin = D5;
-const int sdaPin = D6;
+const int sclPin = D1;
+const int sdaPin = D2;
 
 
 
