@@ -41,8 +41,9 @@ const unsigned long PUMP_PULSE_MS = 50;   // pump ON time per pulse
 const unsigned long FADE_OUT_MS = 1000;   // red -> black
 const unsigned long FADE_IN_MS = 1000;    // black -> idle breathing
 
-const int sneezeZone = 200;         // Distance (mm) to TOF sensor to trigger a sneeze
-const unsigned long QUIET_MS = 2000; // cooldown after a sequence ends before button OR TOF can trigger the next one
+const int sneezeZoneMin = 200;           // Minimum distance (mm) to TOF sensor. Anything greater will trigger a sneeze
+const int sneezeZoneMax = 8000;          // Maximum distance to trigger a sneeze. Anything greater is ignored.
+const unsigned long QUIET_MS = 2000;  // cooldown after a sequence ends before button OR TOF can trigger the next one
 
 const unsigned long DEBOUNCE_MS = 30;
 
@@ -130,7 +131,7 @@ void setup() {
   Serial.println("Alien spitter ready.");
 
   Wire.begin(sdaPin, sclPin);
-  delay(500);
+  delay(750);
 
   if (!lox.begin()) {
     Serial.println(F("Failed to boot VL53L0X"));
@@ -196,9 +197,15 @@ void updateTrigger(unsigned long now, const VL53L0X_RangingMeasurementData_t &me
   // --- TOF proximity ---
   // RangeStatus 4 means phase failure / bad reading, so it's excluded here
   // even though it isn't a trigger to begin with.
-  if (canTrigger && measure.RangeStatus != 4 && measure.RangeMilliMeter < sneezeZone) {
-    Serial.println("TOF proximity -> alert sequence");
-    beginRamp(now);
+  if (measure.RangeMilliMeter > sneezeZoneMin) {
+    if (measure.RangeMilliMeter < sneezeZoneMax) {
+      if (canTrigger && measure.RangeStatus != 4 ) {
+        Serial.print("TOF proximity trigger ");
+        Serial.print(measure.RangeMilliMeter);
+        Serial.println(" mm");
+        beginRamp(now);
+      }
+    }
   }
 }
 
@@ -372,6 +379,6 @@ void runFadeInIdle(unsigned long now) {
     // breathing/color-drift animation continues seamlessly from here
     // instead of jumping back to its own t=0.
     state = IDLE;
-    cooldownUntil = now + QUIET_MS; // neither trigger fires again until this passes
+    cooldownUntil = now + QUIET_MS;  // neither trigger fires again until this passes
   }
 }
