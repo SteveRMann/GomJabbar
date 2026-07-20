@@ -3,7 +3,7 @@
 // ============================================================
 // Sequence on button press OR TOF proximity trigger:
 //   1. Eyes ramp blue-green(idle) -> red over 1s, with an
-//      accelerating chirp sound building tension
+//      accelerating warning trill building tension
 //   2. 3x { sneeze tone burst + pump pulse, simultaneously }
 //   3. Eyes fade red -> black over 1s, then fade black -> idle breathing over 1s
 //   4. Neither trigger can fire again until QUIET_MS has passed
@@ -35,18 +35,15 @@ const unsigned long COLOR_PERIOD_MS = 16000;  // one blue<->green color drift cy
 const int IDLE_MAX_BRIGHTNESS = 700;          // of 1023, idle eye ceiling
 const int IDLE_MIN_BRIGHTNESS = 180;          // of 1023, idle eye floor -- never fully off
 
-const unsigned long RAMP_MS = 3000;           // idle-color -> red ramp
+const unsigned long RAMP_MS = 5000;           // idle-color -> red ramp
 
-// ---------------- Chirp (ramp charge-up warning sound) ----------------
-// Plays during RAMP_TO_RED: short chirps that speed up as the ramp
-// progresses -- chirp,,,,chirp,,chirp,,,,,chirp,chirp,chirp,, -- building
-// tension into the sneeze burst.
-const int CHIRP_FREQ_1 = 1800;                   // Hz, 1st note of each chirp
-const int CHIRP_FREQ_2 = 2000;                   // Hz, 2nd note of each chirp
-const int CHIRP_FREQ_3 = 1200;                   // Hz, 3rd note of each chirp
-const int CHIRP_NOTE_DUR_MS = 15;                // ms, length of each note (3 notes/chirp = 45ms total)
-const unsigned long CHIRP_INTERVAL_START = 450;  // ms between chirps at ramp start (slow)
-const unsigned long CHIRP_INTERVAL_END = 60;     // ms between chirps at ramp end (fast)
+// ---------------- Warning trill (ramp charge-up sound) ----------------
+// Plays during RAMP_TO_RED: an organic, jittered trill (tension rise ->
+// flutter -> drop) that repeats faster and faster as the ramp progresses,
+// building tension into the sneeze burst. This is the same interval/easing
+// schedule the old chirp used -- only the sound itself changed.
+const unsigned long CHIRP_INTERVAL_START = 450;  // ms between trills at ramp start (slow)
+const unsigned long CHIRP_INTERVAL_END = 60;     // ms between trills at ramp end (fast)
 const float CHIRP_EASE_POWER = 2.2;              // >1 = stays slow longer, then rushes near the end
 
 const int SNEEZE_REPS = 3;
@@ -55,10 +52,10 @@ const unsigned long PUMP_PULSE_MS = 50;   // pump ON time per pulse
 const unsigned long FADE_OUT_MS = 1000;   // red -> black
 const unsigned long FADE_IN_MS = 1000;    // black -> idle breathing
 
-const int SNEEZE_ZONE_MIN = 200;          // Minimum distance (mm) to TOF sensor. Anything greater will trigger a sneeze
-const int SNEEZE_ZONE_MAX = 5000;         // Maximum distance to trigger a sneeze. Anything greater is ignored.
-const unsigned long TOF_DEBOUNCE = 500;   // ms the target must be continuously in-zone before a TOF trigger fires
-const unsigned long QUIET_MS = 2000;      // cooldown after a sequence ends before button OR TOF can trigger the next one
+const int sneezeZoneMin = 200;           // Minimum distance (mm) to TOF sensor. Anything greater will trigger a sneeze
+const int sneezeZoneMax = 8000;          // Maximum distance to trigger a sneeze. Anything greater is ignored.
+const unsigned long tofDebounce = 500;   // ms the target must be continuously in-zone before a TOF trigger fires
+const unsigned long QUIET_MS = 2000;  // cooldown after a sequence ends before button OR TOF can trigger the next one
 
 const unsigned long DEBOUNCE_MS = 30;
 
@@ -93,16 +90,6 @@ const ToneStep sneezeSeq[] = {
 const int SNEEZE_SEQ_LEN = sizeof(sneezeSeq) / sizeof(sneezeSeq[0]);
 const int PUMP_FIRE_STEP = 6;  // index of first "burst" step above
 
-// ---------------- Chirp note cascade ----------------
-// Each chirp during RAMP_TO_RED is 3 quick notes back to back rather than
-// a single tone -- reads as more organic/animal-like than a flat beep.
-const ToneStep chirpSeq[] = {
-  { CHIRP_FREQ_1, CHIRP_NOTE_DUR_MS },
-  { CHIRP_FREQ_2, CHIRP_NOTE_DUR_MS },
-  { CHIRP_FREQ_3, CHIRP_NOTE_DUR_MS }
-};
-const int CHIRP_SEQ_LEN = sizeof(chirpSeq) / sizeof(chirpSeq[0]);
-
 // ---------------- State machine ----------------
 enum State { IDLE,
              RAMP_TO_RED,
@@ -115,9 +102,10 @@ unsigned long stateStartTime = 0;
 
 // ramp
 int rampStartR, rampStartG, rampStartB;
-unsigned long nextChirpTime = 0;  // next scheduled chirp during RAMP_TO_RED
-int chirpNoteIdx = -1;            // -1 = no chirp cascade currently playing
-unsigned long chirpNoteStartTime = 0;
+unsigned long nextTrillTime = 0;  // next scheduled warning trill during RAMP_TO_RED
+int trillSegment = -1;            // -1 = not playing, 0 = tension rise, 1 = flutter, 2 = drop
+int trillStep = 0;
+unsigned long trillStepStart = 0;
 
 // sneeze playback
 int sneezeRep = 0;
@@ -134,7 +122,7 @@ int lastRawButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
 bool buttonStable = HIGH;
 
-// TOF debounce -- target must read continuously in-zone for TOF_DEBOUNCE ms
+// TOF debounce -- target must read continuously in-zone for tofDebounce ms
 bool tofDebouncing = false;
 unsigned long tofInZoneSince = 0;
 
@@ -205,13 +193,13 @@ void updateTrigger(unsigned long now, const VL53L0X_RangingMeasurementData_t &me
   // --- abort ramp if the target leaves the sneeze zone before it completes ---
   // (button-triggered ramps are left alone here since they have no zone to leave)
   if (state == RAMP_TO_RED) {
-    bool inZone = (measure.RangeMilliMeter > SNEEZE_ZONE_MIN) &&
-                  (measure.RangeMilliMeter < SNEEZE_ZONE_MAX) &&
+    bool inZone = (measure.RangeMilliMeter > sneezeZoneMin) &&
+                  (measure.RangeMilliMeter < sneezeZoneMax) &&
                   (measure.RangeStatus != 4);
     if (!inZone) {
       Serial.println("Target left sneeze zone -> abort ramp, back to idle");
-      noTone(SPEAKER_PIN);  // cut off any chirp note that was mid-play
-      chirpNoteIdx = -1;    // cancel the in-progress cascade
+      noTone(SPEAKER_PIN);  // cut off the trill if it was mid-play
+      trillSegment = -1;    // cancel the in-progress trill
       state = IDLE;
       stateStartTime = now;
     }
@@ -244,18 +232,18 @@ void updateTrigger(unsigned long now, const VL53L0X_RangingMeasurementData_t &me
   // --- TOF proximity, debounced ---
   // RangeStatus 4 means phase failure / bad reading, so it's excluded here
   // even though it isn't a trigger to begin with. The target must read
-  // in-zone continuously for TOF_DEBOUNCE ms before this actually fires,
+  // in-zone continuously for tofDebounce ms before this actually fires,
   // to filter out single-frame noise blips that would otherwise start a
   // ramp (chirp) and immediately abort it.
-  bool tofInZone = (measure.RangeMilliMeter > SNEEZE_ZONE_MIN) &&
-                    (measure.RangeMilliMeter < SNEEZE_ZONE_MAX) &&
+  bool tofInZone = (measure.RangeMilliMeter > sneezeZoneMin) &&
+                    (measure.RangeMilliMeter < sneezeZoneMax) &&
                     (measure.RangeStatus != 4);
 
   if (tofInZone && canTrigger) {
     if (!tofDebouncing) {
       tofDebouncing = true;
       tofInZoneSince = now;
-    } else if (now - tofInZoneSince >= TOF_DEBOUNCE) {
+    } else if (now - tofInZoneSince >= tofDebounce) {
       Serial.print("TOF proximity trigger ");
       Serial.print(measure.RangeMilliMeter);
       Serial.println(" mm");
@@ -322,25 +310,74 @@ void runIdle(unsigned long now) {
   setEyeColor(0, g, b);
 }
 
-//  ******************** Chirp cascade (3 notes, non-blocking)  ********************
-void startChirp(unsigned long now) {
-  chirpNoteIdx = 0;
-  chirpNoteStartTime = now;
-  tone(SPEAKER_PIN, chirpSeq[0].freq);
+//  ******************** Warning Trill (organic, non-blocking port of the Water Watcher test sketch)  ********************
+// Same three segments as the original -- tension rise, flutter, drop & relax
+// -- each built from short randomly-jittered tone steps. The original used
+// delay() between steps; here each step is timed against millis() so it
+// never blocks the loop() (TOF polling, pump timer, trigger checks, etc.
+// keep running normally while a trill plays).
+
+int jitter(int base, int amount) {
+  return base + random(-amount, amount);
 }
 
-void updateChirp(unsigned long now) {
-  if (chirpNoteIdx < 0) return;  // no cascade in progress
+const int TRILL_A_STEPS = 15;
+const int TRILL_A_STEP_MS = 10;  // Segment A: tension rise, 15 x 10ms = 150ms
+const int TRILL_B_STEPS = 12;
+const int TRILL_B_STEP_MS = 20;  // Segment B: flutter, 12 x 20ms = 240ms
+const int TRILL_C_STEPS = 15;
+const int TRILL_C_STEP_MS = 10;  // Segment C: drop & relax, 15 x 10ms = 150ms
 
-  if (now - chirpNoteStartTime >= chirpSeq[chirpNoteIdx].dur) {
-    chirpNoteIdx++;
-    if (chirpNoteIdx >= CHIRP_SEQ_LEN) {
-      noTone(SPEAKER_PIN);
-      chirpNoteIdx = -1;  // cascade finished
-    } else {
-      chirpNoteStartTime = now;
-      tone(SPEAKER_PIN, chirpSeq[chirpNoteIdx].freq);
+int trillStepFreq(int segment, int step) {
+  switch (segment) {
+    case 0: return jitter(420 + (step * 10), 20);           // rising + wobble
+    case 1: return jitter((step % 2 == 0) ? 540 : 610, 15);  // alternating flutter
+    case 2: return jitter(500 - (step * 12), 10);            // dropping + wobble
+  }
+  return 0;
+}
+
+int trillStepDur(int segment) {
+  switch (segment) {
+    case 0: return TRILL_A_STEP_MS;
+    case 1: return TRILL_B_STEP_MS;
+    case 2: return TRILL_C_STEP_MS;
+  }
+  return 0;
+}
+
+int trillSegmentSteps(int segment) {
+  switch (segment) {
+    case 0: return TRILL_A_STEPS;
+    case 1: return TRILL_B_STEPS;
+    case 2: return TRILL_C_STEPS;
+  }
+  return 0;
+}
+
+void startTrill(unsigned long now) {
+  trillSegment = 0;
+  trillStep = 0;
+  trillStepStart = now;
+  tone(SPEAKER_PIN, trillStepFreq(0, 0), trillStepDur(0));
+}
+
+void updateTrill(unsigned long now) {
+  if (trillSegment < 0) return;  // not playing
+
+  if (now - trillStepStart >= (unsigned long)trillStepDur(trillSegment)) {
+    trillStep++;
+    if (trillStep >= trillSegmentSteps(trillSegment)) {
+      trillSegment++;
+      trillStep = 0;
+      if (trillSegment > 2) {
+        noTone(SPEAKER_PIN);
+        trillSegment = -1;  // trill finished
+        return;
+      }
     }
+    trillStepStart = now;
+    tone(SPEAKER_PIN, trillStepFreq(trillSegment, trillStep), trillStepDur(trillSegment));
   }
 }
 
@@ -351,8 +388,8 @@ void beginRamp(unsigned long now) {
   rampStartB = curB;
   state = RAMP_TO_RED;
   stateStartTime = now;
-  nextChirpTime = now;  // fire the first chirp right away
-  chirpNoteIdx = -1;    // ensure no stale cascade carries over
+  nextTrillTime = now;  // fire the first trill right away
+  trillSegment = -1;    // ensure no stale trill carries over
 }
 
 void runRamp(unsigned long now) {
@@ -365,18 +402,22 @@ void runRamp(unsigned long now) {
   int b = lerp(rampStartB, 0, t);
   setEyeColor(r, g, b);
 
-  // advance any chirp cascade currently mid-playback
-  updateChirp(now);
+  // advance any warning trill currently mid-playback
+  updateTrill(now);
 
-  // Accelerating chirp: the gap between chirps shrinks from
+  // Accelerating trill: the gap between trills shrinks from
   // CHIRP_INTERVAL_START down to CHIRP_INTERVAL_END as t goes 0->1.
   // CHIRP_EASE_POWER > 1 keeps the gaps wide early on and rushes them
   // together near the end of the ramp, right before the sneeze fires.
-  if (now >= nextChirpTime) {
-    startChirp(now);
+  // Note: a full trill takes ~540ms, so once the interval shrinks below
+  // that (it ends at 60ms), a new trill retriggers mid-playback and cuts
+  // the previous one off -- that clipped, urgent stutter near the end of
+  // the ramp is expected, not a bug.
+  if (now >= nextTrillTime) {
+    startTrill(now);
     float easedT = pow(t, CHIRP_EASE_POWER);
     unsigned long interval = CHIRP_INTERVAL_START - (unsigned long)((CHIRP_INTERVAL_START - CHIRP_INTERVAL_END) * easedT);
-    nextChirpTime = now + interval;
+    nextTrillTime = now + interval;
   }
 
   if (t >= 1.0) {
