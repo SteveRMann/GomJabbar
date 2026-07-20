@@ -2,7 +2,8 @@
 // Alien Spitter Prop - Wemos D1 Mini (ESP8266)
 // ============================================================
 // Sequence on button press OR TOF proximity trigger:
-//   1. Eyes ramp blue-green(idle) -> red over 1s
+//   1. Eyes ramp blue-green(idle) -> red over 1s, with an
+//      accelerating chirp sound building tension
 //   2. 3x { sneeze tone burst + pump pulse, simultaneously }
 //   3. Eyes fade red -> black over 1s, then fade black -> idle breathing over 1s
 //   4. Neither trigger can fire again until QUIET_MS has passed
@@ -34,16 +35,30 @@ const unsigned long COLOR_PERIOD_MS = 16000;  // one blue<->green color drift cy
 const int IDLE_MAX_BRIGHTNESS = 700;          // of 1023, idle eye ceiling
 const int IDLE_MIN_BRIGHTNESS = 180;          // of 1023, idle eye floor -- never fully off
 
-const unsigned long RAMP_MS = 1000;  // idle-color -> red ramp
+const unsigned long RAMP_MS = 3000;           // idle-color -> red ramp
+
+// ---------------- Chirp (ramp charge-up warning sound) ----------------
+// Plays during RAMP_TO_RED: short chirps that speed up as the ramp
+// progresses -- chirp,,,,chirp,,chirp,,,,,chirp,chirp,chirp,, -- building
+// tension into the sneeze burst.
+const int CHIRP_FREQ_1 = 1800;                   // Hz, 1st note of each chirp
+const int CHIRP_FREQ_2 = 2000;                   // Hz, 2nd note of each chirp
+const int CHIRP_FREQ_3 = 1200;                   // Hz, 3rd note of each chirp
+const int CHIRP_NOTE_DUR_MS = 15;                // ms, length of each note (3 notes/chirp = 45ms total)
+const unsigned long CHIRP_INTERVAL_START = 450;  // ms between chirps at ramp start (slow)
+const unsigned long CHIRP_INTERVAL_END = 60;     // ms between chirps at ramp end (fast)
+const float CHIRP_EASE_POWER = 2.2;              // >1 = stays slow longer, then rushes near the end
+
 const int SNEEZE_REPS = 3;
 const unsigned long SNEEZE_GAP_MS = 400;  // pause between reps
 const unsigned long PUMP_PULSE_MS = 50;   // pump ON time per pulse
 const unsigned long FADE_OUT_MS = 1000;   // red -> black
 const unsigned long FADE_IN_MS = 1000;    // black -> idle breathing
 
-const int sneezeZoneMin = 200;           // Minimum distance (mm) to TOF sensor. Anything greater will trigger a sneeze
-const int sneezeZoneMax = 8000;          // Maximum distance to trigger a sneeze. Anything greater is ignored.
-const unsigned long QUIET_MS = 2000;  // cooldown after a sequence ends before button OR TOF can trigger the next one
+const int SNEEZE_ZONE_MIN = 200;          // Minimum distance (mm) to TOF sensor. Anything greater will trigger a sneeze
+const int SNEEZE_ZONE_MAX = 5000;         // Maximum distance to trigger a sneeze. Anything greater is ignored.
+const unsigned long TOF_DEBOUNCE = 500;   // ms the target must be continuously in-zone before a TOF trigger fires
+const unsigned long QUIET_MS = 2000;      // cooldown after a sequence ends before button OR TOF can trigger the next one
 
 const unsigned long DEBOUNCE_MS = 30;
 
@@ -78,6 +93,16 @@ const ToneStep sneezeSeq[] = {
 const int SNEEZE_SEQ_LEN = sizeof(sneezeSeq) / sizeof(sneezeSeq[0]);
 const int PUMP_FIRE_STEP = 6;  // index of first "burst" step above
 
+// ---------------- Chirp note cascade ----------------
+// Each chirp during RAMP_TO_RED is 3 quick notes back to back rather than
+// a single tone -- reads as more organic/animal-like than a flat beep.
+const ToneStep chirpSeq[] = {
+  { CHIRP_FREQ_1, CHIRP_NOTE_DUR_MS },
+  { CHIRP_FREQ_2, CHIRP_NOTE_DUR_MS },
+  { CHIRP_FREQ_3, CHIRP_NOTE_DUR_MS }
+};
+const int CHIRP_SEQ_LEN = sizeof(chirpSeq) / sizeof(chirpSeq[0]);
+
 // ---------------- State machine ----------------
 enum State { IDLE,
              RAMP_TO_RED,
@@ -90,6 +115,9 @@ unsigned long stateStartTime = 0;
 
 // ramp
 int rampStartR, rampStartG, rampStartB;
+unsigned long nextChirpTime = 0;  // next scheduled chirp during RAMP_TO_RED
+int chirpNoteIdx = -1;            // -1 = no chirp cascade currently playing
+unsigned long chirpNoteStartTime = 0;
 
 // sneeze playback
 int sneezeRep = 0;
@@ -105,6 +133,10 @@ unsigned long pumpOffAt = 0;
 int lastRawButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
 bool buttonStable = HIGH;
+
+// TOF debounce -- target must read continuously in-zone for TOF_DEBOUNCE ms
+bool tofDebouncing = false;
+unsigned long tofInZoneSince = 0;
 
 // current eye color (so ramp/fade can read the live idle color)
 int curR = 0, curG = 0, curB = 0;
@@ -170,6 +202,21 @@ void loop() {
 void updateTrigger(unsigned long now, const VL53L0X_RangingMeasurementData_t &measure) {
   bool canTrigger = (state == IDLE) && (now >= cooldownUntil);
 
+  // --- abort ramp if the target leaves the sneeze zone before it completes ---
+  // (button-triggered ramps are left alone here since they have no zone to leave)
+  if (state == RAMP_TO_RED) {
+    bool inZone = (measure.RangeMilliMeter > SNEEZE_ZONE_MIN) &&
+                  (measure.RangeMilliMeter < SNEEZE_ZONE_MAX) &&
+                  (measure.RangeStatus != 4);
+    if (!inZone) {
+      Serial.println("Target left sneeze zone -> abort ramp, back to idle");
+      noTone(SPEAKER_PIN);  // cut off any chirp note that was mid-play
+      chirpNoteIdx = -1;    // cancel the in-progress cascade
+      state = IDLE;
+      stateStartTime = now;
+    }
+  }
+
   // --- button, debounced ---
   int raw = digitalRead(BUTTON_PIN);
 
@@ -194,18 +241,29 @@ void updateTrigger(unsigned long now, const VL53L0X_RangingMeasurementData_t &me
     return;
   }
 
-  // --- TOF proximity ---
+  // --- TOF proximity, debounced ---
   // RangeStatus 4 means phase failure / bad reading, so it's excluded here
-  // even though it isn't a trigger to begin with.
-  if (measure.RangeMilliMeter > sneezeZoneMin) {
-    if (measure.RangeMilliMeter < sneezeZoneMax) {
-      if (canTrigger && measure.RangeStatus != 4 ) {
-        Serial.print("TOF proximity trigger ");
-        Serial.print(measure.RangeMilliMeter);
-        Serial.println(" mm");
-        beginRamp(now);
-      }
+  // even though it isn't a trigger to begin with. The target must read
+  // in-zone continuously for TOF_DEBOUNCE ms before this actually fires,
+  // to filter out single-frame noise blips that would otherwise start a
+  // ramp (chirp) and immediately abort it.
+  bool tofInZone = (measure.RangeMilliMeter > SNEEZE_ZONE_MIN) &&
+                    (measure.RangeMilliMeter < SNEEZE_ZONE_MAX) &&
+                    (measure.RangeStatus != 4);
+
+  if (tofInZone && canTrigger) {
+    if (!tofDebouncing) {
+      tofDebouncing = true;
+      tofInZoneSince = now;
+    } else if (now - tofInZoneSince >= TOF_DEBOUNCE) {
+      Serial.print("TOF proximity trigger ");
+      Serial.print(measure.RangeMilliMeter);
+      Serial.println(" mm");
+      beginRamp(now);
+      tofDebouncing = false;
     }
+  } else {
+    tofDebouncing = false;
   }
 }
 
@@ -264,6 +322,28 @@ void runIdle(unsigned long now) {
   setEyeColor(0, g, b);
 }
 
+//  ******************** Chirp cascade (3 notes, non-blocking)  ********************
+void startChirp(unsigned long now) {
+  chirpNoteIdx = 0;
+  chirpNoteStartTime = now;
+  tone(SPEAKER_PIN, chirpSeq[0].freq);
+}
+
+void updateChirp(unsigned long now) {
+  if (chirpNoteIdx < 0) return;  // no cascade in progress
+
+  if (now - chirpNoteStartTime >= chirpSeq[chirpNoteIdx].dur) {
+    chirpNoteIdx++;
+    if (chirpNoteIdx >= CHIRP_SEQ_LEN) {
+      noTone(SPEAKER_PIN);
+      chirpNoteIdx = -1;  // cascade finished
+    } else {
+      chirpNoteStartTime = now;
+      tone(SPEAKER_PIN, chirpSeq[chirpNoteIdx].freq);
+    }
+  }
+}
+
 // ---------------- RAMP_TO_RED ----------------
 void beginRamp(unsigned long now) {
   rampStartR = curR;
@@ -271,6 +351,8 @@ void beginRamp(unsigned long now) {
   rampStartB = curB;
   state = RAMP_TO_RED;
   stateStartTime = now;
+  nextChirpTime = now;  // fire the first chirp right away
+  chirpNoteIdx = -1;    // ensure no stale cascade carries over
 }
 
 void runRamp(unsigned long now) {
@@ -282,6 +364,20 @@ void runRamp(unsigned long now) {
   int g = lerp(rampStartG, 0, t);
   int b = lerp(rampStartB, 0, t);
   setEyeColor(r, g, b);
+
+  // advance any chirp cascade currently mid-playback
+  updateChirp(now);
+
+  // Accelerating chirp: the gap between chirps shrinks from
+  // CHIRP_INTERVAL_START down to CHIRP_INTERVAL_END as t goes 0->1.
+  // CHIRP_EASE_POWER > 1 keeps the gaps wide early on and rushes them
+  // together near the end of the ramp, right before the sneeze fires.
+  if (now >= nextChirpTime) {
+    startChirp(now);
+    float easedT = pow(t, CHIRP_EASE_POWER);
+    unsigned long interval = CHIRP_INTERVAL_START - (unsigned long)((CHIRP_INTERVAL_START - CHIRP_INTERVAL_END) * easedT);
+    nextChirpTime = now + interval;
+  }
 
   if (t >= 1.0) {
     beginSneezeRep(now);
