@@ -29,19 +29,17 @@ const int EYE_R_PIN = D7;
 const int SPEAKER_PIN = D8;  // tone() output
 
 
-// ---------------- Tunable ----------------
+// --------------------------------------------------------------------------------
+// ------------------------------------ Tunable -----------------------------------
+// --------------------------------------------------------------------------------
 const unsigned long BREATH_PERIOD_MS = 7000;  // one idle brightness breathe cycle
 const unsigned long COLOR_PERIOD_MS = 16000;  // one blue<->green color drift cycle (deliberately not a clean multiple of BREATH_PERIOD_MS so the two never lock into a repeating pattern)
 const int IDLE_MAX_BRIGHTNESS = 700;          // of 1023, idle eye ceiling
 const int IDLE_MIN_BRIGHTNESS = 180;          // of 1023, idle eye floor -- never fully off
 
-const unsigned long RAMP_MS = 5000;           // idle-color -> red ramp
+const unsigned long RAMP_MS = 3000;           // idle-color -> red ramp
 
 // ---------------- Warning trill (ramp charge-up sound) ----------------
-// Plays during RAMP_TO_RED: an organic, jittered trill (tension rise ->
-// flutter -> drop) that repeats faster and faster as the ramp progresses,
-// building tension into the sneeze burst. This is the same interval/easing
-// schedule the old chirp used -- only the sound itself changed.
 const unsigned long CHIRP_INTERVAL_START = 450;  // ms between trills at ramp start (slow)
 const unsigned long CHIRP_INTERVAL_END = 60;     // ms between trills at ramp end (fast)
 const float CHIRP_EASE_POWER = 2.2;              // >1 = stays slow longer, then rushes near the end
@@ -59,36 +57,22 @@ const unsigned long QUIET_MS = 2000;  // cooldown after a sequence ends before b
 
 const unsigned long DEBOUNCE_MS = 30;
 
-// ---------------- Sneeze tone sequence ----------------
-// Invented alien "sneeze": rising charge-up whine, jagged burst,
-// descending wet honk tail. Tune freely by ear.
-struct ToneStep {
-  uint16_t freq;
-  uint16_t dur;
-};
+// ---------------- Spit sound (chaotic, regenerated per rep) ----------------
+// Ported from the Water Watcher test sketch's waterWatcherAlienSpit().
+// Segment A emits a short 8ms tone "pluck" followed by a variable silence
+// gap (matching the original's tone(freq, 8) + delay(random(8,14)) pairing
+// exactly). Segments B and C had equal tone-duration/delay in the original,
+// so they play back-to-back with no gap. generateSpitSequence() runs fresh
+// at the start of every rep.
+const int SPIT_SEG_A_STEPS = 10;  // irregular high-frequency charge
+const int SPIT_SEG_B_STEPS = 18;  // chaotic dual-tone beating
+const int SPIT_SEG_C_STEPS = 12;  // low-frequency expulsion
+const int MAX_SPIT_STEPS = (SPIT_SEG_A_STEPS * 2) + SPIT_SEG_B_STEPS + SPIT_SEG_C_STEPS;  // 50
 
-const ToneStep sneezeSeq[] = {
-  // charge-up whine (rising)
-  { 400, 60 },
-  { 500, 55 },
-  { 650, 50 },
-  { 800, 45 },
-  { 1000, 40 },
-  { 1300, 35 },
-  // crackling burst  <-- pump fires when this segment starts
-  { 2400, 25 },
-  { 3400, 18 },
-  { 1600, 15 },
-  { 2800, 18 },
-  { 1100, 15 },
-  { 2000, 15 },
-  // wet descending tail
-  { 350, 70 },
-  { 220, 90 },
-  { 140, 120 }
-};
-const int SNEEZE_SEQ_LEN = sizeof(sneezeSeq) / sizeof(sneezeSeq[0]);
-const int PUMP_FIRE_STEP = 6;  // index of first "burst" step above
+uint16_t spitFreq[MAX_SPIT_STEPS];  // 0 = silence
+uint16_t spitDur[MAX_SPIT_STEPS];
+int spitSeqLen = 0;         // actual length used this rep
+int spitPumpFireStep = 0;   // computed fresh each rep -- index of first Segment C step
 
 // ---------------- State machine ----------------
 enum State { IDLE,
@@ -169,7 +153,20 @@ void loop() {
   unsigned long now = millis();
 
   VL53L0X_RangingMeasurementData_t measure;
-  lox.rangingTest(&measure, false);  // pass in 'true' to get debug data printout!
+  measure.RangeMilliMeter = 0;
+  measure.RangeStatus = 4;  // treat as "invalid" when we skip the sensor read below
+
+  // Only poll the TOF sensor in states that actually use its result: IDLE
+  // (waiting for a trigger) and RAMP_TO_RED (target-left-zone abort check).
+  // SNEEZE_PLAY/SNEEZE_GAP/the fades never read `measure`, so skipping the
+  // sensor call there is free -- and it matters a lot, because
+  // lox.rangingTest() blocks for ~20-30ms. With it running every loop()
+  // iteration regardless of state, loop() itself was bottlenecked to one
+  // cycle per ~20-30ms, which silently ate the spit sound's short
+  // (as low as 5-8ms) step durations and dragged the whole thing out slow.
+  if (state == IDLE || state == RAMP_TO_RED) {
+    lox.rangingTest(&measure, false);  // pass in 'true' to get debug data printout!
+  }
 
   updateTrigger(now, measure);
   updatePump(now);
@@ -287,15 +284,11 @@ int lerp(int a, int b, float t) {
 
 
 //  ******************** IDLE: slow, smooth, never-off blue<->green breathing  ********************
-// Pure function of "elapsed" so both steady idle and the fade-in can share it.
 void computeIdleColor(unsigned long elapsed, int &g, int &b) {
-  // brightness: continuous sine, floored so it never reaches 0
   float bPhase = (float)(elapsed % BREATH_PERIOD_MS) / (float)BREATH_PERIOD_MS;
   float bWave = (sinf(bPhase * 2.0 * PI) + 1.0) / 2.0;  // 0..1
   int level = IDLE_MIN_BRIGHTNESS + (int)(bWave * (IDLE_MAX_BRIGHTNESS - IDLE_MIN_BRIGHTNESS));
 
-  // color: separate, slower sine blends continuously between blue and green
-  // (no hard switch -- always some mix of both)
   float cPhase = (float)(elapsed % COLOR_PERIOD_MS) / (float)COLOR_PERIOD_MS;
   float cWave = (sinf(cPhase * 2.0 * PI) + 1.0) / 2.0;  // 0..1, 0=blue 1=green
 
@@ -310,29 +303,23 @@ void runIdle(unsigned long now) {
   setEyeColor(0, g, b);
 }
 
-//  ******************** Warning Trill (organic, non-blocking port of the Water Watcher test sketch)  ********************
-// Same three segments as the original -- tension rise, flutter, drop & relax
-// -- each built from short randomly-jittered tone steps. The original used
-// delay() between steps; here each step is timed against millis() so it
-// never blocks the loop() (TOF polling, pump timer, trigger checks, etc.
-// keep running normally while a trill plays).
-
+//  ******************** Warning Trill  ********************
 int jitter(int base, int amount) {
   return base + random(-amount, amount);
 }
 
 const int TRILL_A_STEPS = 15;
-const int TRILL_A_STEP_MS = 10;  // Segment A: tension rise, 15 x 10ms = 150ms
+const int TRILL_A_STEP_MS = 10;
 const int TRILL_B_STEPS = 12;
-const int TRILL_B_STEP_MS = 20;  // Segment B: flutter, 12 x 20ms = 240ms
+const int TRILL_B_STEP_MS = 20;
 const int TRILL_C_STEPS = 15;
-const int TRILL_C_STEP_MS = 10;  // Segment C: drop & relax, 15 x 10ms = 150ms
+const int TRILL_C_STEP_MS = 10;
 
 int trillStepFreq(int segment, int step) {
   switch (segment) {
-    case 0: return jitter(420 + (step * 10), 20);           // rising + wobble
-    case 1: return jitter((step % 2 == 0) ? 540 : 610, 15);  // alternating flutter
-    case 2: return jitter(500 - (step * 12), 10);            // dropping + wobble
+    case 0: return jitter(420 + (step * 10), 20);
+    case 1: return jitter((step % 2 == 0) ? 540 : 610, 15);
+    case 2: return jitter(500 - (step * 12), 10);
   }
   return 0;
 }
@@ -363,7 +350,7 @@ void startTrill(unsigned long now) {
 }
 
 void updateTrill(unsigned long now) {
-  if (trillSegment < 0) return;  // not playing
+  if (trillSegment < 0) return;
 
   if (now - trillStepStart >= (unsigned long)trillStepDur(trillSegment)) {
     trillStep++;
@@ -372,7 +359,7 @@ void updateTrill(unsigned long now) {
       trillStep = 0;
       if (trillSegment > 2) {
         noTone(SPEAKER_PIN);
-        trillSegment = -1;  // trill finished
+        trillSegment = -1;
         return;
       }
     }
@@ -388,8 +375,8 @@ void beginRamp(unsigned long now) {
   rampStartB = curB;
   state = RAMP_TO_RED;
   stateStartTime = now;
-  nextTrillTime = now;  // fire the first trill right away
-  trillSegment = -1;    // ensure no stale trill carries over
+  nextTrillTime = now;
+  trillSegment = -1;
 }
 
 void runRamp(unsigned long now) {
@@ -402,17 +389,8 @@ void runRamp(unsigned long now) {
   int b = lerp(rampStartB, 0, t);
   setEyeColor(r, g, b);
 
-  // advance any warning trill currently mid-playback
   updateTrill(now);
 
-  // Accelerating trill: the gap between trills shrinks from
-  // CHIRP_INTERVAL_START down to CHIRP_INTERVAL_END as t goes 0->1.
-  // CHIRP_EASE_POWER > 1 keeps the gaps wide early on and rushes them
-  // together near the end of the ramp, right before the sneeze fires.
-  // Note: a full trill takes ~540ms, so once the interval shrinks below
-  // that (it ends at 60ms), a new trill retriggers mid-playback and cuts
-  // the previous one off -- that clipped, urgent stutter near the end of
-  // the ramp is expected, not a bug.
   if (now >= nextTrillTime) {
     startTrill(now);
     float easedT = pow(t, CHIRP_EASE_POWER);
@@ -431,26 +409,67 @@ void beginSneezeRep(unsigned long now) {
   startSneezeSequence(now);
 }
 
+void generateSpitSequence() {
+  int idx = 0;
+
+  // Segment A: irregular high-frequency charge (tone + variable gap)
+  for (int i = 0; i < SPIT_SEG_A_STEPS; i++) {
+    int freq = jitter(900 + random(0, 300), 40);
+    int totalDur = random(8, 14);  // 8..13, matches original delay()
+
+    spitFreq[idx] = freq;
+    spitDur[idx] = 8;  // tone always plays exactly 8ms, like the original
+    idx++;
+
+    int gap = totalDur - 8;
+    if (gap > 0) {
+      spitFreq[idx] = 0;  // silence marker
+      spitDur[idx] = gap;
+      idx++;
+    }
+  }
+
+  // Segment B: chaotic dual-tone beating -- no gap, back-to-back tones
+  for (int i = 0; i < SPIT_SEG_B_STEPS; i++) {
+    int base = jitter(600 + random(-80, 80), 25);
+    int harmonic = jitter(base + random(40, 120), 20);
+    spitFreq[idx] = (i % 2 == 0) ? base : harmonic;
+    spitDur[idx] = 10;
+    idx++;
+  }
+
+  spitPumpFireStep = idx;  // pump fires at the start of Segment C
+
+  // Segment C: low-frequency expulsion -- no gap
+  for (int i = 0; i < SPIT_SEG_C_STEPS; i++) {
+    spitFreq[idx] = jitter(350 - (i * 10), 30);
+    spitDur[idx] = 10;
+    idx++;
+  }
+
+  spitSeqLen = idx;
+}
+
 void startSneezeSequence(unsigned long now) {
+  generateSpitSequence();  // fresh randomized spit sound each rep
   sneezeStepIdx = 0;
   pumpFiredThisRep = false;
   stepStartTime = now;
   state = SNEEZE_PLAY;
-  tone(SPEAKER_PIN, sneezeSeq[0].freq);
+  if (spitFreq[0] == 0) noTone(SPEAKER_PIN); else tone(SPEAKER_PIN, spitFreq[0]);
 }
 
 void runSneezePlay(unsigned long now) {
   setEyeColor(1023, 0, 0);  // solid red while sneezing
 
-  if (sneezeStepIdx == PUMP_FIRE_STEP && !pumpFiredThisRep) {
+  if (sneezeStepIdx == spitPumpFireStep && !pumpFiredThisRep) {
     firePumpPulse(now);
     pumpFiredThisRep = true;
   }
 
-  unsigned long stepDur = sneezeSeq[sneezeStepIdx].dur;
-  if (now - stepStartTime >= stepDur) {
+  if (now - stepStartTime >= spitDur[sneezeStepIdx]) {
     sneezeStepIdx++;
-    if (sneezeStepIdx >= SNEEZE_SEQ_LEN) {
+    if (sneezeStepIdx >= spitSeqLen) {
       noTone(SPEAKER_PIN);
       sneezeRep++;
       if (sneezeRep >= SNEEZE_REPS) {
@@ -460,7 +479,7 @@ void runSneezePlay(unsigned long now) {
         stateStartTime = now;
       }
     } else {
-      tone(SPEAKER_PIN, sneezeSeq[sneezeStepIdx].freq);
+      if (spitFreq[sneezeStepIdx] == 0) noTone(SPEAKER_PIN); else tone(SPEAKER_PIN, spitFreq[sneezeStepIdx]);
       stepStartTime = now;
     }
   }
@@ -493,8 +512,6 @@ void runFadeToBlack(unsigned long now) {
 }
 
 // ---------------- FADE_IN_IDLE: black -> idle breathing over 1s ----------------
-// Idle's own animation runs from t=0 here (via computeIdleColor), scaled by
-// fade progress, so it arrives already in motion rather than snapping on.
 void beginFadeInIdle(unsigned long now) {
   state = FADE_IN_IDLE;
   stateStartTime = now;
@@ -512,10 +529,7 @@ void runFadeInIdle(unsigned long now) {
   setEyeColor(0, g, b);
 
   if (elapsed >= FADE_IN_MS) {
-    // Switch to steady idle WITHOUT resetting stateStartTime, so the
-    // breathing/color-drift animation continues seamlessly from here
-    // instead of jumping back to its own t=0.
     state = IDLE;
-    cooldownUntil = now + QUIET_MS;  // neither trigger fires again until this passes
+    cooldownUntil = now + QUIET_MS;
   }
 }
