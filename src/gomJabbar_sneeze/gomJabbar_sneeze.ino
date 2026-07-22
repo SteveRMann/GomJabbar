@@ -1,12 +1,16 @@
 // ============================================================
 // Alien Spitter Prop - Wemos D1 Mini (ESP8266)
 // ============================================================
-// Sequence on button press OR TOF proximity trigger:
+// TOF proximity trigger sequence:
 //   1. Eyes ramp blue-green(idle) -> red over 1s, with an
 //      accelerating warning trill building tension
 //   2. 3x { sneeze tone burst + pump pulse, simultaneously }
 //   3. Eyes fade red -> black over 1s, then fade black -> idle breathing over 1s
-//   4. Neither trigger can fire again until QUIET_MS has passed
+//   4. Trigger cannot fire again until QUIET_MS has passed
+//
+// Button on D3: NOT a sneeze trigger. Holding it down runs the
+// pump for PRIME_PUMP_MS (5s) to prime the ~15ft of tubing
+// between the pump and the prop before use.
 //
 // D1/D2 (GPIO5/GPIO4) are reserved for a future I2C gesture
 // sensor and are NOT used in this sketch.
@@ -46,7 +50,8 @@ const float CHIRP_EASE_POWER = 2.2;              // >1 = stays slow longer, then
 
 const int SNEEZE_REPS = 3;
 const unsigned long SNEEZE_GAP_MS = 400;  // pause between reps
-const unsigned long PUMP_PULSE_MS = 50;   // pump ON time per pulse
+const unsigned long PUMP_PULSE_MS = 50;   // pump ON time per sneeze pulse
+const unsigned long PRIME_PUMP_MS = 5000;  // pump ON time for button-triggered tube priming
 const unsigned long FADE_OUT_MS = 1000;   // red -> black
 const unsigned long FADE_IN_MS = 1000;    // black -> idle breathing
 
@@ -220,9 +225,13 @@ void updateTrigger(unsigned long now, const VL53L0X_RangingMeasurementData_t &me
     }
   }
 
-  if (buttonJustPressed && canTrigger) {
-    Serial.println("Button pressed -> alert sequence");
-    beginRamp(now);
+  // Button no longer triggers the sneeze sequence -- it just runs the pump
+  // for PRIME_PUMP_MS to push fluid through the ~15ft of tubing between the
+  // pump and the prop. Only allowed while IDLE and not already running the
+  // pump, so it can't stomp on a sneeze pulse or restart itself mid-prime.
+  if (buttonJustPressed && state == IDLE && !pumpOn) {
+    Serial.println("Button pressed -> priming pump (5s)");
+    firePumpFor(now, PRIME_PUMP_MS);
     return;
   }
 
@@ -254,10 +263,14 @@ void updateTrigger(unsigned long now, const VL53L0X_RangingMeasurementData_t &me
 
 
 // ******************** Pump (independent timer)  ********************
-void firePumpPulse(unsigned long now) {
+void firePumpFor(unsigned long now, unsigned long durationMs) {
   digitalWrite(PUMP_PIN, HIGH);
   pumpOn = true;
-  pumpOffAt = now + PUMP_PULSE_MS;
+  pumpOffAt = now + durationMs;
+}
+
+void firePumpPulse(unsigned long now) {
+  firePumpFor(now, PUMP_PULSE_MS);
 }
 
 void updatePump(unsigned long now) {

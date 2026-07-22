@@ -44,3 +44,13 @@ Distance (mm): 801
 
 ============================================
 
+"Eye" LED wiring
+Wire - LED Color
+Brn - Ground
+Org - Red
+Grn - Green
+Blu - Blue
+
+============================================
+
+
