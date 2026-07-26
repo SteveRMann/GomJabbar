@@ -122,7 +122,7 @@
       <controlPoints2>
         <point x="1.535" y="0.76"/>
         <point x="1.5225" y="1.1575"/>
-        <point x="1.64" y="1.45"/>
+        <point x="1.73" y="1.465"/>
       </controlPoints2>
       <color hex="000000"/>
       <pointCount>THREE</pointCount>
@@ -154,7 +154,7 @@
       <endingStyle>Round</endingStyle>
     </diylc.connectivity.CurvedTrace>
     <diylc.connectivity.CurvedTrace>
-      <id>b564b654-6a8d-468f-8f11-6e0aae4e6efc</id>
+      <id>999dad3e-fd27-4570-90a9-dc54466104be</id>
       <name>Trace7</name>
       <alphaPercent>
         <value>70</value>
@@ -247,9 +247,9 @@
         <value>100</value>
       </alphaPercent>
       <points>
-        <point x="1.75" y="3.17333333"/>
-        <point x="2.13166667" y="3.16333333"/>
-        <point x="1.94083333" y="3.16833333"/>
+        <point x="0.335" y="3.16333333"/>
+        <point x="0.64166667" y="3.17833333"/>
+        <point x="0.48833333" y="3.17083333"/>
       </points>
       <bodyColor hex="ffffff"/>
       <borderColor hex="000000"/>
@@ -501,7 +501,7 @@
       <shape>Standard</shape>
     </diylc.passive.Resistor>
     <diylc.passive.Resistor>
-      <id>771bd1c3-dc7f-4d6d-b91a-a45ee17acde6</id>
+      <id>817c407a-8ad3-42c4-940e-48a1698d3018</id>
       <name>R7</name>
       <alphaPercent>
         <value>100</value>
@@ -719,7 +719,7 @@
       <orientation>DEFAULT</orientation>
     </diylc.misc.Label>
     <diylc.misc.Label>
-      <id>35ab2566-8c8d-4aa7-ac57-0af87023004c</id>
+      <id>874c53b9-cca2-4df0-be74-357fb549106b</id>
       <name>LAB5</name>
       <point x="2.1" y="3.41"/>
       <text>3V GND</text>
@@ -785,7 +785,7 @@
       <orientation>DEFAULT</orientation>
     </diylc.misc.Label>
     <diylc.misc.Label>
-      <id>83f6e0a9-52ca-48da-99df-7512bdbdf77a</id>
+      <id>05ebe7c2-e49d-411c-a28d-61bae4bd81c6</id>
       <name>LAB11</name>
       <point x="0.296" y="1.578"/>
       <text>3V GND</text>
